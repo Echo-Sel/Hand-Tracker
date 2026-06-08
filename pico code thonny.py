@@ -3,6 +3,7 @@ import network
 import socket
 import time
 from machine import Pin, I2C
+from collections import namedtuple
 import secret #gets wifi stuff from secret.py (not on github)
 
 # WiFi (hide) 
@@ -21,13 +22,14 @@ MODE1 = 0x00
 PRESCALE = 0xFE
 LED0_ON_L = 0x06
 
-# Servo channel mapping
-servo_channels = {
-    'thumb': 9,   
-    'index': 10,  
-    'middle': 7, 
-    'ring': 11,    
-    'pinky': 8    
+# Servo Variable Definitions
+# Using nested Dicts because Dataclasses are not in MicroPython
+fingers = { # other state vars - fully closed/open, P I D, previous curernt pos - current pos = rise (D)  running sum - (I) 
+    'thumb': {'servo_channel': 9, 'set_point': 0, 'curr_point': 0, 'OTHER_STATE_VARS': []}, ## replicate for fingers 
+    'index': FingerData(10,0,0,0),  
+    'middle': FingerData(7,0,0,0), 
+    'ring': FingerData(11,0,0,0),    
+    'pinky': FingerData(8,0,0,0),    
 }
 min_servo_pulse = 150
 max_servo_pulse = 600
@@ -209,8 +211,40 @@ def connect_wifi():
     while not wlan.isconnected():
         time.sleep(0.5)
     print("   connected! http://{}".format(wlan.ifconfig()[0]))
+    
+    
+def handle_web_requests(s):
+    global fingers
+    cl, addr = s.accept() #accepts connnections 
+    try:
+        cl.settimeout(0.1) #gives browser .1 seconds to send data (ensures no lagging) 
+        request = cl.recv(1024).decode("utf-8")
+        #serves website
+        if "GET /d?" in request:
+            cl.send("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            try:
+                query = request.split(' ')[1].split('?')[1]
+                parts = query.split('&')
+                for p in parts:
+                    if '=' in p and not p.startswith('ts='): #doesnt get thumb cofused w timestanp
+                        name, val = p.split('=') #finds the values 
+                        try:
+                            fingers[name]['set_point'] = percent_to_pulse(int(val))
+                        except KeyError:
+                            pass
+            except:
+                pass
+        elif "GET / " in request: #check GET vs SET or POST 
+            cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n".format(len(HTML)))
+            cl.sendall(HTML) # gets the html file w the .js code init
+    except Exception:
+        pass
+    finally:
+        cl.close() #closes connections 
 
-#
+# def servo_control(): ##write code for servo control, global for last function call time (ts) 
+
+
 def main():
     init_i2c() #wakes up servo driver 
     connect_wifi()
@@ -223,31 +257,7 @@ def main():
     print("server live. visit the IP in chrome.")
 
     while True:
-        cl, addr = s.accept() #accepts connnections 
-        try:
-            cl.settimeout(0.1) #gives browser .1 seconds to send data (ensures no lagging) 
-            request = cl.recv(1024).decode("utf-8")
-            #serves website
-            if "GET /d?" in request:
-                cl.send("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                try:
-                    query = request.split(' ')[1].split('?')[1]
-                    parts = query.split('&')
-                    for p in parts:
-                        if '=' in p and not p.startswith('ts='): #doesnt get thumb cofused w timestanp
-                            name, val = p.split('=') #finds the values 
-                            if name in servo_channels:
-                                pulse = percent_to_pulse(int(val))
-                                set_servo(servo_channels[name], pulse)
-                except:
-                    pass
-            elif "GET / " in request: #check GET vs SET or POST 
-                cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n".format(len(HTML)))
-                cl.sendall(HTML) # gets the html file w the .js code init
-        except Exception:
-            pass
-        finally:
-            cl.close() #closes connections 
+        handle_web_requests(s)
 
 if __name__ == "__main__":
     main()
